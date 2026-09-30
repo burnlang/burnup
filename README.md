@@ -62,4 +62,4 @@ installed. It also removes the lines it added to your shell profiles.
 
 ## License
 
-[MIT License](LICENSE)
+[GNU General Public License v3.0](LICENSE)
