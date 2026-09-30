@@ -71,16 +71,41 @@ priv fun proxy(tool: string, rest: [string]) {
     if (!contains(TOOLS, tool)) {
         die("burnup cannot run `${tool}`", "")
     }
-    var t = activeToolchain(true)
-    var exe = t.dir + "/bin/" + tool
+    var editor = tool == "burn-lsp" || (tool == "burn" && len(rest) > 0 && rest[0] == "lsp")
+    var t: Toolchain? = null
+    if (editor) {
+        t = serverToolchain()
+    } else {
+        t = activeToolchain(true)
+    }
+    var exe = t!!.dir + "/bin/" + tool
     if (!Files.isFile(exe)) {
-        die("Burn ${t.name} has no ${tool}", "")
+        die("Burn ${t!!.name} has no ${tool}", "")
     }
     var code = Process.run(exe, rest)
     if (code == -1) {
-        die("cannot start ${exe}", "reinstall it with `burnup install --force ${t.name}`")
+        die("cannot start ${exe}", "reinstall it with `burnup install --force ${t!!.name}`")
     }
     exit(code)
+}
+
+priv fun serverToolchain(): Toolchain {
+    var a = activeSpec()
+    var found = findInstalled(a.spec)
+    if (found != null) {
+        return found!!
+    }
+    var d = findInstalled(defaultName())
+    if (d != null) {
+        warn("Burn ${a.spec} (asked for by ${a.reason}) is not installed, so the language server uses ${d!!.name}; run `burnup install ${a.spec}`")
+        return d!!
+    }
+    var any = installed()
+    if (len(any) > 0) {
+        return any[0]
+    }
+    die("no Burn version is installed, so the language server cannot start", "install one with `burnup install`")
+    return any[0]
 }
 
 priv fun cmdInstall(args: [string]) {
@@ -314,6 +339,10 @@ priv fun cmdLink(args: [string]) {
     var dir = absPath(p[1])
     if (!Files.isFile(dir + "/bin/burn")) {
         die("${dir} has no bin/burn", "build one with `sh scripts/package.sh --prefix <dir>` in a Burn checkout")
+    }
+    var head = Process.output("head", ["-c", "300", dir + "/bin/burn"]).out
+    if (contains(head, " proxy ")) {
+        die("${dir}/bin/burn is a burnup shim, so linking it would make burnup run itself forever", "link a real Burn build, for example the output of scripts/package.sh")
     }
     var target = toolchainDir(p[0])
     if (Files.isDir(target) || Files.isFile(target)) {

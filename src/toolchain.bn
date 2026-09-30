@@ -313,6 +313,7 @@ priv fun fromRelease(t: Target, partial: string): bool {
 
 priv fun fromSource(t: Target, partial: string) {
     if (Process.output("cargo", ["--version"]).code != 0) {
+        releaseLock(t.name)
         die("building Burn ${t.name} from source needs Rust, but `cargo` was not found", "install Rust from https://rustup.rs, or pick a version with a prebuilt release (`burnup list --remote`)")
     }
     var src = burnHome() + "/cache/burn"
@@ -322,23 +323,52 @@ priv fun fromSource(t: Target, partial: string) {
         Files.makeDir(parentDir(src))
         if (git(["clone", "-q", "--filter=blob:none", burnRepo(), src]).code != 0) {
             Files.remove(src)
+            releaseLock(t.name)
             die("cannot clone ${burnRepo()}", "")
         }
     }
     if (git(["-C", src, "fetch", "-q", "origin", t.ref]).code != 0) {
+        releaseLock(t.name)
         die("cannot fetch ${t.ref} from ${burnRepo()}", "")
     }
     if (git(["-C", src, "checkout", "-q", "--force", "FETCH_HEAD"]).code != 0) {
+        releaseLock(t.name)
         die("cannot check out ${t.ref}", "")
     }
     if (!Files.isFile(src + "/scripts/package.sh")) {
+        releaseLock(t.name)
         die("Burn ${t.name} is too old for burnup (it has no scripts/package.sh)", "install a newer version")
     }
     step("Building", "Burn ${t.name} from source (the first build takes a minute)")
     if (run("sh", [src + "/scripts/package.sh", "--prefix", partial, "-q"]) != 0) {
         Files.remove(partial)
+        releaseLock(t.name)
         die("building Burn ${t.name} failed", "")
     }
+}
+
+priv fun lockPath(name: string): string {
+    return toolchainsDir() + "/." + name + ".lock"
+}
+
+priv fun takeLock(name: string) {
+    var lock = lockPath(name)
+    if (Files.isFile(lock)) {
+        var since = trim(readFile(lock))
+        var age = 0
+        if (isInt(since)) {
+            age = nowMs() - toInt(since)
+        }
+        if (age >= 0 && age < 3600000) {
+            die("another burnup is installing Burn ${name} right now", "wait for it to finish; if nothing is running, remove ${lock}")
+        }
+    }
+    Files.makeDir(toolchainsDir())
+    writeFile(lock, toString(nowMs()))
+}
+
+priv fun releaseLock(name: string) {
+    Files.remove(lockPath(name))
 }
 
 pub fun install(t: Target, force: bool): Toolchain {
@@ -350,6 +380,7 @@ pub fun install(t: Target, force: bool): Toolchain {
             return e
         }
     }
+    takeLock(t.name)
     var dir = toolchainDir(t.name)
     var partial = dir + ".partial"
     Files.remove(partial)
@@ -363,12 +394,15 @@ pub fun install(t: Target, force: bool): Toolchain {
     var version = trim(Process.output(partial + "/bin/burn", ["version"]).out)
     if (!startsWith(version, "Burn ")) {
         Files.remove(partial)
+        releaseLock(t.name)
         die("the installed burn binary of ${t.name} does not run", "")
     }
     Files.remove(dir)
     if (!Files.rename(partial, dir)) {
+        releaseLock(t.name)
         die("cannot move the toolchain into ${dir}", "")
     }
+    releaseLock(t.name)
     var rev = t.rev
     if (source == "source") {
         var head = git(["-C", burnHome() + "/cache/burn", "rev-parse", "HEAD"])
