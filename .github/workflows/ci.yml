@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Lint
+        run: |
+          sh -n install.sh
+          shellcheck install.sh
+      - name: Install from source
+        run: sh install.sh --from-source --no-modify-path --prefix "$RUNNER_TEMP/burn"
+      - name: Use the toolchain
+        run: |
+          export PATH="$RUNNER_TEMP/burn/bin:$PATH" BURN_HOME="$RUNNER_TEMP/burn"
+          burnup show
+          cd "$RUNNER_TEMP"
+          ash init github.com/ci/hello
+          cd hello
+          ash build
+          ./build/hello
+          ash install
+      - name: Uninstall
+        run: |
+          "$RUNNER_TEMP/burn/bin/burnup" uninstall --prefix "$RUNNER_TEMP/burn"
+          test ! -e "$RUNNER_TEMP/burn"
