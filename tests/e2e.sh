@@ -99,6 +99,13 @@ expect "$($BURNUP run v1.1.0 burn version)" "Burn "
 $BURNUP uninstall v1.1.0 >/dev/null 2>&1
 [ ! -e "$BURN_HOME/toolchains/v1.1.0" ] || fail "uninstall left the toolchain"
 cd "$work/proj"
+out="$(burn lsp </dev/null 2>&1 || true)"
+expect "$out" "the language server uses v1.0.0"
+[ ! -e "$BURN_HOME/toolchains/v1.1.0" ] || fail "starting the language server installed a toolchain"
+date +%s000 >"$BURN_HOME/toolchains/.v1.1.0.lock"
+if burn run >/dev/null 2>"$work/err"; then fail "a held install lock was ignored"; fi
+expect "$(cat "$work/err")" "another burnup is installing Burn v1.1.0"
+rm -f "$BURN_HOME/toolchains/.v1.1.0.lock"
 out="$(burn run 2>&1)"
 expect "$out" "Missing Burn 1.1"
 expect "$out" "Hello from proj!"
@@ -109,6 +116,8 @@ expect "$(cat "$work/err")" "there is no Burn version called"
 expect "$(cat "$work/err")" "v1.1.0"
 expect "$($BURNUP list --remote)" "v2.0.0-beta"
 
+if $BURNUP link loop "$BURN_HOME" 2>"$work/err"; then fail "linking the burnup home was accepted"; fi
+expect "$(cat "$work/err")" "is a burnup shim"
 $BURNUP link dev "$dist" >/dev/null 2>&1
 expect "$($BURNUP list)" "dev"
 [ "$($BURNUP run dev burn eval 'print(1)')" = "1" ] || fail "the linked version did not run"
