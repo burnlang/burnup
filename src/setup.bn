@@ -1,0 +1,179 @@
+import "fs"
+import "process"
+import "paths.bn"
+import "toolchain.bn"
+import "ui.bn"
+
+pub const TOOLS = ["burn", "burni", "burnc", "burnfmt", "burn-lsp", "bvm"]
+
+priv const MARKER = "# added by burnup"
+priv const OLD_MARKER = "# added by the Burn installer"
+
+pub fun selfPath(): string {
+    return binDir() + "/burnup"
+}
+
+pub fun writeShims() {
+    Files.makeDir(binDir())
+    for (tool in TOOLS) {
+        var path = binDir() + "/" + tool
+        var text = "#!/bin/sh\nexec " + shellQuote(selfPath()) + " proxy " + tool + " \"$@\"\n"
+        Files.remove(path)
+        if (!writeFile(path, text)) {
+            die("cannot write ${path}", "")
+        }
+        Process.run("chmod", ["+x", path])
+    }
+}
+
+priv fun profiles(): [string] {
+    var home = env("HOME")
+    var out: [string] = []
+    for (f in [".profile", ".bashrc", ".bash_profile", ".zshrc", ".zprofile"]) {
+        if (Files.isFile(home + "/" + f)) {
+            out.push(home + "/" + f)
+        }
+    }
+    return out
+}
+
+priv fun envFile(): string {
+    return burnHome() + "/env"
+}
+
+pub fun writeEnv() {
+    var bin = binDir()
+    var text = "case \":\${PATH}:\" in\n    *:\"" + bin + "\":*) ;;\n    *) export PATH=\"" + bin + ":$PATH\" ;;\nesac\n"
+    writeFile(envFile(), text)
+}
+
+pub fun onPath(): bool {
+    return contains(":" + env("PATH") + ":", ":" + binDir() + ":")
+}
+
+pub fun modifyPath(): [string] {
+    writeEnv()
+    var changed: [string] = []
+    if (onPath()) {
+        return changed
+    }
+    var line = ". \"" + envFile() + "\" " + MARKER
+    var files = profiles()
+    if (len(files) == 0) {
+        files = [env("HOME") + "/.profile"]
+    }
+    for (f in files) {
+        var text = ""
+        if (Files.isFile(f)) {
+            text = readFile(f)
+        }
+        if (contains(text, MARKER) || contains(text, OLD_MARKER)) {
+            continue
+        }
+        if (text != "" && !endsWith(text, "\n")) {
+            text = text + "\n"
+        }
+        writeFile(f, text + "\n" + line + "\n")
+        changed.push(f)
+    }
+    var fish = env("HOME") + "/.config/fish"
+    if (Files.isDir(fish)) {
+        Files.makeDir(fish + "/conf.d")
+        writeFile(fish + "/conf.d/burn.fish", "fish_add_path -g \"" + binDir() + "\" " + MARKER + "\n")
+        changed.push(fish + "/conf.d/burn.fish")
+    }
+    return changed
+}
+
+pub fun removePathLines() {
+    for (f in profiles()) {
+        var text = readFile(f)
+        if (!contains(text, MARKER) && !contains(text, OLD_MARKER)) {
+            continue
+        }
+        var kept: [string] = []
+        for (line in split(text, "\n")) {
+            if (!contains(line, MARKER) && !contains(line, OLD_MARKER)) {
+                kept.push(line)
+            }
+        }
+        writeFile(f, join(kept, "\n"))
+    }
+    Files.remove(env("HOME") + "/.config/fish/conf.d/burn.fish")
+}
+
+priv fun ashRepo(): string {
+    var r = env("ASH_REPO")
+    if (r != "") {
+        return r
+    }
+    return "https://github.com/burnlang/ash"
+}
+
+pub fun installAsh(t: Toolchain) {
+    var ref = env("ASH_REF")
+    if (ref == "") {
+        ref = "master"
+    }
+    var dir = burnHome() + "/tools/github.com/burnlang/ash"
+    step("Installing", "ash, the package manager")
+    Files.remove(dir)
+    Files.makeDir(parentDir(dir))
+    var c = Process.output("env", ["GIT_TERMINAL_PROMPT=0", "git", "clone", "-q", "--depth", "1", "--branch", ref, ashRepo(), dir])
+    if (c.code != 0) {
+        warn("could not download ash from ${ashRepo()}; try again later with `burnup ash`")
+        return
+    }
+    Files.remove(dir + "/.git")
+    var out = binDir() + "/ash"
+    Process.setCwd(dir)
+    var built = Process.output(t.dir + "/bin/burn", ["build", "--target", "native", "-o", out + ".new"])
+    if (built.code == 0) {
+        Files.rename(out + ".new", out)
+    } else if (contains(built.err, "native") || contains(built.err, "link")) {
+        warn("native compilation is not available here, so ash runs on the interpreter")
+        writeFile(out, "#!/bin/sh\nexec " + shellQuote(binDir() + "/burni") + " " + shellQuote(dir + "/src/main.bn") + " \"$@\"\n")
+        Process.run("chmod", ["+x", out])
+    } else {
+        eprint(built.out + built.err)
+        warn("ash does not build with Burn ${t.name}; try `burnup ash` after `burnup update`")
+        return
+    }
+    writeFile(burnHome() + "/tools/github.com/burnlang/ash.version", ref)
+    step("Installed", "ash")
+}
+
+pub fun selfUpdate(t: Toolchain) {
+    var base = env("BURNUP_RELEASES")
+    if (base == "") {
+        base = "https://github.com/burnlang/burnup/releases/latest/download"
+    }
+    var target = selfPath()
+    var got = Process.output("curl", ["-fsSL", "-o", target + ".new", base + "/burnup-" + platform()])
+    if (got.code == 0 && Process.run("chmod", ["+x", target + ".new"]) == 0 && Process.output(target + ".new", ["version"]).code == 0) {
+        Files.rename(target + ".new", target)
+        step("Updated", "burnup from the latest release")
+        return
+    }
+    Files.remove(target + ".new")
+    var repo = env("BURNUP_REPO")
+    if (repo == "") {
+        repo = "https://github.com/burnlang/burnup"
+    }
+    var dir = burnHome() + "/tmp/burnup-src"
+    Files.remove(dir)
+    step("Building", "burnup from ${repo}")
+    if (Process.output("env", ["GIT_TERMINAL_PROMPT=0", "git", "clone", "-q", "--depth", "1", repo, dir]).code != 0) {
+        die("cannot download burnup from ${repo}", "")
+    }
+    Process.setCwd(dir)
+    var built = Process.output(t.dir + "/bin/burn", ["build", "--target", "native", "-o", target + ".new"])
+    if (built.code != 0) {
+        eprint(built.out + built.err)
+        Files.remove(dir)
+        die("burnup does not build with Burn ${t.name}", "")
+    }
+    Files.rename(target + ".new", target)
+    Files.remove(dir)
+    step("Updated", "burnup")
+}

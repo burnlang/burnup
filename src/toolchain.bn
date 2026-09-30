@@ -1,0 +1,480 @@
+import "fs"
+import "process"
+import "paths.bn"
+import "semver.bn"
+import "ui.bn"
+
+pub def type Toolchain {
+    string name
+    string dir
+    string ref
+    string rev
+    string source
+    string version
+}
+
+pub def type Target {
+    string name
+    string kind
+    string ref
+    string rev
+}
+
+pub def type BurnRemote {
+    {string: string} tags
+    {string: string} heads
+    string head
+    string headBranch
+    string error
+    bool loaded
+}
+
+pub def type Active {
+    string spec
+    string reason
+}
+
+priv var remoteCache = BurnRemote { tags: {}, heads: {}, head: "", headBranch: "", error: "", loaded: false }
+
+pub fun burnRepo(): string {
+    var r = env("BURN_REPO")
+    if (r != "") {
+        return r
+    }
+    return "https://github.com/burnlang/burn"
+}
+
+pub fun releasesBase(): string {
+    var r = env("BURN_RELEASES")
+    if (r != "") {
+        return r
+    }
+    return burnRepo() + "/releases/download"
+}
+
+pub fun platform(): string {
+    var os = lower(trim(Process.output("uname", ["-s"]).out))
+    var arch = trim(Process.output("uname", ["-m"]).out)
+    if (os == "darwin") {
+        os = "macos"
+    }
+    if (arch == "amd64") {
+        arch = "x86_64"
+    }
+    if (arch == "arm64") {
+        arch = "aarch64"
+    }
+    return os + "-" + arch
+}
+
+priv fun git(args: [string]): ProcessOutput {
+    var full = ["GIT_TERMINAL_PROMPT=0", "git"]
+    for (a in args) {
+        full.push(a)
+    }
+    return Process.output("env", full)
+}
+
+pub fun remote(): BurnRemote {
+    if (remoteCache.loaded) {
+        return remoteCache
+    }
+    remoteCache.loaded = true
+    var out = git(["ls-remote", "--symref", burnRepo()])
+    if (out.code != 0) {
+        remoteCache.error = trim(out.err)
+        return remoteCache
+    }
+    for (line in split(out.out, "\n")) {
+        var parts = split(line, "\t")
+        if (len(parts) != 2) {
+            continue
+        }
+        var left = parts[0]
+        var ref = trim(parts[1])
+        if (startsWith(left, "ref: ") && ref == "HEAD") {
+            remoteCache.headBranch = replace(substring(left, 5), "refs/heads/", "")
+        } else if (ref == "HEAD") {
+            remoteCache.head = left
+        } else if (startsWith(ref, "refs/heads/")) {
+            remoteCache.heads[substring(ref, 11)] = left
+        } else if (startsWith(ref, "refs/tags/")) {
+            var tag = substring(ref, 10)
+            if (endsWith(tag, "^{}")) {
+                remoteCache.tags[substring(tag, 0, len(tag) - 3)] = left
+            } else if (remoteCache.tags[tag] == null) {
+                remoteCache.tags[tag] = left
+            }
+        }
+    }
+    return remoteCache
+}
+
+pub fun versionTags(r: BurnRemote): [string] {
+    var out: [string] = []
+    for tag, sha in r.tags {
+        if (parseVersion(tag).ok) {
+            out.push(tag)
+        }
+    }
+    var n = len(out)
+    for (i in 0..n) {
+        for (j in i + 1..n) {
+            if (compareVersions(parseVersion(out[j]), parseVersion(out[i])) > 0) {
+                var t = out[i]
+                out[i] = out[j]
+                out[j] = t
+            }
+        }
+    }
+    return out
+}
+
+priv fun isHex(text: string): bool {
+    if (len(text) < 7 || len(text) > 40) {
+        return false
+    }
+    for (c in chars(lower(text))) {
+        if (!isDigit(c) && indexOf("abcdef", c) < 0) {
+            return false
+        }
+    }
+    return true
+}
+
+pub fun versionMatches(spec: string, v: Version): bool {
+    if (!v.ok) {
+        return false
+    }
+    var t = trim(spec)
+    if (startsWith(t, "^") || startsWith(t, "~") || startsWith(t, "=") || startsWith(t, ">")) {
+        return specAllows(parseSpec(t), v)
+    }
+    var b = parseVersion(t)
+    if (!b.ok) {
+        return false
+    }
+    if (v.major != b.major || (b.parts >= 2 && v.minor != b.minor) || (b.parts >= 3 && v.patch != b.patch)) {
+        return false
+    }
+    return b.pre == "" || b.pre == v.pre
+}
+
+pub fun isLatest(spec: string): bool {
+    return spec == "" || spec == "latest" || spec == "stable"
+}
+
+pub fun resolve(spec: string): Target {
+    var r = remote()
+    if (r.error != "") {
+        die("cannot reach the Burn repository ${burnRepo()}: ${r.error}", "check your connection, or set BURN_REPO")
+    }
+    var tags = versionTags(r)
+    if (isLatest(spec)) {
+        for (t in tags) {
+            if (parseVersion(t).pre == "") {
+                return Target { name: t, kind: "tag", ref: t, rev: r.tags[t]!! }
+            }
+        }
+        if (len(tags) > 0) {
+            return Target { name: tags[0], kind: "tag", ref: tags[0], rev: r.tags[tags[0]]!! }
+        }
+        var branch = r.headBranch
+        if (branch == "") {
+            branch = "master"
+        }
+        return Target { name: branch, kind: "branch", ref: branch, rev: r.head }
+    }
+    if (r.heads[spec] != null) {
+        return Target { name: spec, kind: "branch", ref: spec, rev: r.heads[spec]!! }
+    }
+    for (candidate in [spec, "v" + spec]) {
+        if (r.tags[candidate] != null) {
+            return Target { name: candidate, kind: "tag", ref: candidate, rev: r.tags[candidate]!! }
+        }
+    }
+    for (t in tags) {
+        if (versionMatches(spec, parseVersion(t))) {
+            return Target { name: t, kind: "tag", ref: t, rev: r.tags[t]!! }
+        }
+    }
+    var hex = spec
+    if (startsWith(hex, "#")) {
+        hex = substring(hex, 1)
+    }
+    if (isHex(hex)) {
+        return Target { name: substring(lower(hex), 0, min(len(hex), 12)), kind: "commit", ref: lower(hex), rev: lower(hex) }
+    }
+    var known: [string] = []
+    for (t in slice(tags, 0, min(len(tags), 8))) {
+        known.push(t)
+    }
+    for b, sha in r.heads {
+        if (len(known) < 12) {
+            known.push(b)
+        }
+    }
+    var help = "there are no versions yet"
+    if (len(known) > 0) {
+        help = "available: " + join(known, ", ") + "; see all with `burnup list --remote`"
+    }
+    die("there is no Burn version called `${spec}`", help)
+    return Target { name: "", kind: "", ref: "", rev: "" }
+}
+
+pub fun toolchainDir(name: string): string {
+    return toolchainsDir() + "/" + name
+}
+
+pub fun readToolchain(name: string): Toolchain? {
+    var dir = toolchainDir(name)
+    if (!Files.isFile(dir + "/bin/burn")) {
+        return null
+    }
+    var meta = readKeys(dir + "/burnup.toml")
+    return Toolchain {
+        name: name,
+        dir: dir,
+        ref: meta["ref"] ?? name,
+        rev: meta["rev"] ?? "",
+        source: meta["source"] ?? "unknown",
+        version: meta["version"] ?? ""
+    }
+}
+
+pub fun installed(): [Toolchain] {
+    var out: [Toolchain] = []
+    for (n in Files.list(toolchainsDir())) {
+        if (endsWith(n, ".partial") || startsWith(n, ".")) {
+            continue
+        }
+        var t = readToolchain(n)
+        if (t != null) {
+            out.push(t!!)
+        }
+    }
+    return out
+}
+
+pub fun settingsFile(): string {
+    return burnHome() + "/burnup.toml"
+}
+
+pub fun defaultName(): string {
+    return readKeys(settingsFile())["default"] ?? ""
+}
+
+pub fun setDefault(name: string) {
+    var s = readKeys(settingsFile())
+    if (name == "") {
+        s = {}
+    } else {
+        s["default"] = name
+    }
+    writeKeys(settingsFile(), s)
+}
+
+priv fun run(program: string, args: [string]): int {
+    var code = Process.run(program, args)
+    if (code == -1) {
+        die("`${program}` is not installed", "")
+    }
+    return code
+}
+
+priv fun fromRelease(t: Target, partial: string): bool {
+    var archive = "burn-${platform()}.tar.gz"
+    var url = releasesBase() + "/" + t.ref + "/" + archive
+    var tmp = burnHome() + "/tmp/" + t.name
+    Files.remove(tmp)
+    Files.makeDir(tmp + "/x")
+    var got = Process.output("curl", ["-fsSL", "-o", tmp + "/" + archive, url])
+    if (got.code != 0) {
+        Files.remove(tmp)
+        return false
+    }
+    step("Unpacking", archive)
+    if (Process.output("tar", ["-xzf", tmp + "/" + archive, "-C", tmp + "/x"]).code != 0) {
+        Files.remove(tmp)
+        return false
+    }
+    var root = tmp + "/x"
+    if (Files.isDir(root + "/burn")) {
+        root = root + "/burn"
+    }
+    if (!Files.isFile(root + "/bin/burn")) {
+        Files.remove(tmp)
+        return false
+    }
+    var moved = Files.rename(root, partial)
+    Files.remove(tmp)
+    return moved
+}
+
+priv fun fromSource(t: Target, partial: string) {
+    if (Process.output("cargo", ["--version"]).code != 0) {
+        die("building Burn ${t.name} from source needs Rust, but `cargo` was not found", "install Rust from https://rustup.rs, or pick a version with a prebuilt release (`burnup list --remote`)")
+    }
+    var src = burnHome() + "/cache/burn"
+    if (!Files.isDir(src + "/.git")) {
+        step("Cloning", burnRepo())
+        Files.remove(src)
+        Files.makeDir(parentDir(src))
+        if (git(["clone", "-q", "--filter=blob:none", burnRepo(), src]).code != 0) {
+            Files.remove(src)
+            die("cannot clone ${burnRepo()}", "")
+        }
+    }
+    if (git(["-C", src, "fetch", "-q", "origin", t.ref]).code != 0) {
+        die("cannot fetch ${t.ref} from ${burnRepo()}", "")
+    }
+    if (git(["-C", src, "checkout", "-q", "--force", "FETCH_HEAD"]).code != 0) {
+        die("cannot check out ${t.ref}", "")
+    }
+    if (!Files.isFile(src + "/scripts/package.sh")) {
+        die("Burn ${t.name} is too old for burnup (it has no scripts/package.sh)", "install a newer version")
+    }
+    step("Building", "Burn ${t.name} from source (the first build takes a minute)")
+    if (run("sh", [src + "/scripts/package.sh", "--prefix", partial, "-q"]) != 0) {
+        Files.remove(partial)
+        die("building Burn ${t.name} failed", "")
+    }
+}
+
+pub fun install(t: Target, force: bool): Toolchain {
+    var existing = readToolchain(t.name)
+    if (existing != null && !force) {
+        var e = existing!!
+        if (t.kind != "branch" || e.rev == t.rev || t.rev == "") {
+            step("Installed", "Burn ${e.name} is already installed")
+            return e
+        }
+    }
+    var dir = toolchainDir(t.name)
+    var partial = dir + ".partial"
+    Files.remove(partial)
+    Files.makeDir(toolchainsDir())
+    var source = "release"
+    step("Installing", "Burn ${t.name}")
+    if (t.kind != "tag" || !fromRelease(t, partial)) {
+        source = "source"
+        fromSource(t, partial)
+    }
+    var version = trim(Process.output(partial + "/bin/burn", ["version"]).out)
+    if (!startsWith(version, "Burn ")) {
+        Files.remove(partial)
+        die("the installed burn binary of ${t.name} does not run", "")
+    }
+    Files.remove(dir)
+    if (!Files.rename(partial, dir)) {
+        die("cannot move the toolchain into ${dir}", "")
+    }
+    var rev = t.rev
+    if (source == "source") {
+        var head = git(["-C", burnHome() + "/cache/burn", "rev-parse", "HEAD"])
+        if (head.code == 0) {
+            rev = trim(head.out)
+        }
+    }
+    writeKeys(dir + "/burnup.toml", {"name": t.name, "ref": t.ref, "rev": rev, "source": source, "version": substring(version, 5)})
+    step("Installed", "Burn ${t.name} (${substring(version, 5)})")
+    return readToolchain(t.name)!!
+}
+
+pub fun findInstalled(spec: string): Toolchain? {
+    var list = installed()
+    for (t in list) {
+        if (t.name == spec || t.name == "v" + spec) {
+            return t
+        }
+    }
+    if (isLatest(spec)) {
+        var best: Toolchain? = null
+        for (t in list) {
+            var v = parseVersion(t.name)
+            if (v.ok && (best == null || compareVersions(v, parseVersion(best!!.name)) > 0)) {
+                best = t
+            }
+        }
+        return best
+    }
+    var best: Toolchain? = null
+    for (t in list) {
+        var v = parseVersion(t.name)
+        if (versionMatches(spec, v) && (best == null || compareVersions(v, parseVersion(best!!.name)) > 0)) {
+            best = t
+        }
+    }
+    return best
+}
+
+pub fun pinnedIn(dir: string): Active? {
+    if (Files.isFile(dir + "/burn.toml")) {
+        var pin = readKeys(dir + "/burn.toml")["package.burn"]
+        if (pin != null && pin!! != "") {
+            return Active { spec: pin!!, reason: dir + "/burn.toml" }
+        }
+    }
+    if (Files.isFile(dir + "/.burn-version")) {
+        var v = trim(readFile(dir + "/.burn-version"))
+        if (v != "") {
+            return Active { spec: split(v, "\n")[0], reason: dir + "/.burn-version" }
+        }
+    }
+    return null
+}
+
+pub fun activeSpec(): Active {
+    var e = env("BURN_TOOLCHAIN")
+    if (e != "") {
+        return Active { spec: e, reason: "the BURN_TOOLCHAIN environment variable" }
+    }
+    var dir = Process.cwd()
+    while (true) {
+        var p = pinnedIn(dir)
+        if (p != null) {
+            return p!!
+        }
+        if (dir == "/" || dir == "") {
+            break
+        }
+        dir = parentDir(dir)
+    }
+    var d = defaultName()
+    if (d == "") {
+        die("no Burn version is installed", "install one with `burnup install`")
+    }
+    return Active { spec: d, reason: "the default" }
+}
+
+pub fun activeToolchain(autoInstall: bool): Toolchain {
+    var a = activeSpec()
+    var found = findInstalled(a.spec)
+    if (found != null) {
+        return found!!
+    }
+    if (!autoInstall) {
+        die("Burn ${a.spec} (asked for by ${a.reason}) is not installed", "install it with `burnup install ${a.spec}`")
+    }
+    step("Missing", "Burn ${a.spec}, asked for by ${a.reason}")
+    return install(resolve(a.spec), false)
+}
+
+pub fun uninstall(name: string) {
+    var t = findInstalled(name)
+    if (t == null) {
+        die("Burn ${name} is not installed", "see what is installed with `burnup list`")
+    }
+    Files.remove(t!!.dir)
+    step("Removed", "Burn ${t!!.name}")
+    if (defaultName() == t!!.name) {
+        var rest = installed()
+        if (len(rest) > 0) {
+            setDefault(rest[0].name)
+            warn("the default was ${t!!.name}; it is now ${rest[0].name}")
+        } else {
+            setDefault("")
+            warn("no Burn version is installed any more; install one with `burnup install`")
+        }
+    }
+}

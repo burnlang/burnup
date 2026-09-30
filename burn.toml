@@ -1,0 +1,13 @@
+[package]
+name = "github.com/burnlang/burnup"
+version = "0.2.0"
+kind = "app"
+target = "native"
+main = "src/main.bn"
+description = "Installs and switches Burn versions"
+
+[dependencies]
+
+[scripts]
+dev = "burni src/main.bn"
+test = "burni tests/main.bn && sh tests/e2e.sh"

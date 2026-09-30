@@ -1,0 +1,461 @@
+import "fs"
+import "process"
+import "strings"
+import "paths.bn"
+import "semver.bn"
+import "setup.bn"
+import "toolchain.bn"
+import "ui.bn"
+
+const VERSION = "0.2.0"
+
+priv fun help() {
+    print(bold("burnup") + " " + VERSION + " - installs and switches Burn versions")
+    print("")
+    print(bold("Versions"))
+    print("  burnup install [version...]     install Burn versions (default: the latest)")
+    print("  burnup uninstall <version>      remove a version")
+    print("  burnup default [version]        show or set the version used everywhere")
+    print("  burnup list                     installed versions")
+    print("  burnup list --remote            versions that can be installed")
+    print("  burnup update                   update branch versions like master, and ash")
+    print("")
+    print(bold("Projects"))
+    print("  burnup pin <version>            use a version in this project (burn.toml) or folder")
+    print("  burnup show                     which version runs here, and why")
+    print("  burnup which [tool]             the file that runs for burn, burni, burnc, ...")
+    print("  burnup run <version> <cmd...>   run one command with a version")
+    print("")
+    print(bold("Setup"))
+    print("  burnup link <name> <dir>        use a local build (with bin/burn) as a version")
+    print("  burnup ash                      install or update ash, the package manager")
+    print("  burnup self update              update burnup itself")
+    print("  burnup self uninstall           remove Burn, burnup and everything they installed")
+    print("")
+    print("A version is a release like 26.1 or v26.1.0, `latest`, a branch like `master`, or a commit.")
+    print("Projects pin one with  burn = \"26.1\"  in the [package] section of burn.toml.")
+}
+
+priv fun option(args: [string], name: string): string {
+    for i, a in args {
+        if (a == name && i + 1 < len(args)) {
+            return args[i + 1]
+        }
+        if (startsWith(a, name + "=")) {
+            return substring(a, len(name) + 1)
+        }
+    }
+    return ""
+}
+
+priv fun positional(args: [string], valued: [string]): [string] {
+    var out: [string] = []
+    var skip = false
+    for (a in args) {
+        if (skip) {
+            skip = false
+            continue
+        }
+        if (contains(valued, a)) {
+            skip = true
+            continue
+        }
+        if (!startsWith(a, "-")) {
+            out.push(a)
+        }
+    }
+    return out
+}
+
+priv fun proxy(tool: string, rest: [string]) {
+    if (!contains(TOOLS, tool)) {
+        die("burnup cannot run `${tool}`", "")
+    }
+    var t = activeToolchain(true)
+    var exe = t.dir + "/bin/" + tool
+    if (!Files.isFile(exe)) {
+        die("Burn ${t.name} has no ${tool}", "")
+    }
+    var code = Process.run(exe, rest)
+    if (code == -1) {
+        die("cannot start ${exe}", "reinstall it with `burnup install --force ${t.name}`")
+    }
+    exit(code)
+}
+
+priv fun cmdInstall(args: [string]) {
+    var force = contains(args, "--force")
+    var specs = positional(args, [])
+    if (len(specs) == 0) {
+        specs = ["latest"]
+    }
+    for (spec in specs) {
+        var t = install(resolve(spec), force)
+        if (defaultName() == "") {
+            setDefault(t.name)
+            step("Default", "Burn ${t.name}")
+        }
+    }
+}
+
+priv fun cmdDefault(args: [string]) {
+    var specs = positional(args, [])
+    if (len(specs) == 0) {
+        var d = defaultName()
+        if (d == "") {
+            print(dim("no default yet; set one with `burnup default latest`"))
+        } else {
+            print(d)
+        }
+        return
+    }
+    var found = findInstalled(specs[0])
+    var t = found ?? install(resolve(specs[0]), false)
+    setDefault(t.name)
+    step("Default", "Burn ${t.name}")
+}
+
+priv fun cmdList(args: [string]) {
+    if (contains(args, "--remote") || contains(args, "-r")) {
+        var r = remote()
+        if (r.error != "") {
+            die("cannot reach ${burnRepo()}: ${r.error}", "")
+        }
+        var tags = versionTags(r)
+        if (len(tags) == 0) {
+            print(dim("no releases yet"))
+        }
+        for (t in tags) {
+            var mark = ""
+            if (findInstalled(t) != null && findInstalled(t)!!.name == t) {
+                mark = green("  installed")
+            }
+            print(t + mark)
+        }
+        var branches = keys(r.heads)
+        sort(branches)
+        for (b in branches) {
+            if (b == r.headBranch) {
+                print(b + dim("  (newest commit, built from source)"))
+            }
+        }
+        return
+    }
+    var list = installed()
+    if (len(list) == 0) {
+        print(dim("nothing installed; run `burnup install`"))
+        return
+    }
+    var d = defaultName()
+    var width = 0
+    for (t in list) {
+        width = max(width, len(t.name))
+    }
+    for (t in list) {
+        var marks = ""
+        if (t.name == d) {
+            marks = green(" (default)")
+        }
+        var info = t.version
+        if (t.source == "source" && t.rev != "") {
+            info = info + dim(" " + substring(t.rev, 0, 9))
+        }
+        if (t.source == "link") {
+            info = info + dim(" linked to " + t.ref)
+        }
+        print(bold(padRight(t.name, width, " ")) + "  " + info + marks)
+    }
+}
+
+priv fun cmdUpdate(args: [string]) {
+    var list = installed()
+    var r = remote()
+    if (r.error != "") {
+        die("cannot reach ${burnRepo()}: ${r.error}", "")
+    }
+    var updated = 0
+    for (t in list) {
+        var head = r.heads[t.name]
+        if (head != null && t.source != "link" && head!! != t.rev) {
+            install(Target { name: t.name, kind: "branch", ref: t.name, rev: head!! }, true)
+            updated += 1
+        }
+    }
+    var tags = versionTags(r)
+    var newest = ""
+    for (t in tags) {
+        if (newest == "" && parseVersion(t).pre == "") {
+            newest = t
+        }
+    }
+    if (newest == "" && len(tags) > 0) {
+        newest = tags[0]
+    }
+    var d = defaultName()
+    var dv = parseVersion(d)
+    if (newest != "" && dv.ok && compareVersions(parseVersion(newest), dv) > 0) {
+        print("")
+        print("Burn ${newest} is out. Switch with:  burnup default ${newest}")
+    }
+    if (updated == 0) {
+        step("Finished", "the installed branch versions are up to date")
+    }
+    if (!contains(args, "--no-ash") && Files.isFile(binDir() + "/ash")) {
+        installAsh(activeToolchain(true))
+    }
+}
+
+priv fun cmdPin(args: [string]) {
+    var specs = positional(args, [])
+    if (len(specs) == 0) {
+        die("which version should be pinned?", "for example `burnup pin 26.1`, or `burnup pin master`")
+    }
+    var spec = specs[0]
+    if (findInstalled(spec) == null) {
+        install(resolve(spec), false)
+    }
+    var toml = Process.cwd() + "/burn.toml"
+    if (Files.isFile(toml)) {
+        var lines = split(readFile(toml), "\n")
+        var out: [string] = []
+        var inPackage = false
+        var done = false
+        for (line in lines) {
+            var t = trim(line)
+            if (startsWith(t, "[")) {
+                if (inPackage && !done) {
+                    var n = len(out)
+                    while (n > 0 && trim(out[n - 1]) == "") {
+                        n -= 1
+                    }
+                    var blanks = slice(out, n)
+                    out = slice(out, 0, n)
+                    out.push("burn = \"" + spec + "\"")
+                    for (b in blanks) {
+                        out.push(b)
+                    }
+                    done = true
+                }
+                inPackage = t == "[package]"
+            } else if (inPackage && (startsWith(t, "burn =") || startsWith(t, "burn="))) {
+                out.push("burn = \"" + spec + "\"")
+                done = true
+                continue
+            }
+            out.push(line)
+        }
+        if (inPackage && !done) {
+            while (len(out) > 0 && trim(out[len(out) - 1]) == "") {
+                out.pop()
+            }
+            out.push("burn = \"" + spec + "\"")
+            out.push("")
+            done = true
+        }
+        if (!done) {
+            die("burn.toml has no [package] section", "")
+        }
+        writeFile(toml, join(out, "\n"))
+        step("Pinned", "Burn ${spec} in burn.toml")
+        return
+    }
+    writeFile(Process.cwd() + "/.burn-version", spec + "\n")
+    step("Pinned", "Burn ${spec} in .burn-version")
+}
+
+priv fun cmdShow() {
+    var a = activeSpec()
+    var t = findInstalled(a.spec)
+    if (t == null) {
+        print("Burn ${a.spec} " + red("(not installed)") + ", from ${a.reason}")
+        return
+    }
+    print(bold(t!!.name) + " " + t!!.version + dim("  from " + a.reason))
+    print(dim(t!!.dir))
+}
+
+priv fun cmdWhich(args: [string]) {
+    var tools = positional(args, [])
+    if (len(tools) == 0) {
+        tools = ["burn"]
+    }
+    var t = activeToolchain(false)
+    for (tool in tools) {
+        if (tool == "ash") {
+            print(binDir() + "/ash")
+        } else if (!contains(TOOLS, tool)) {
+            die("`${tool}` is not part of Burn", "the tools are " + join(TOOLS, ", "))
+        } else {
+            print(t.dir + "/bin/" + tool)
+        }
+    }
+}
+
+priv fun cmdRun(args: [string]) {
+    if (len(args) < 2) {
+        die("usage: burnup run <version> <command> [args...]", "for example `burnup run 26.1 burn build`")
+    }
+    var found = findInstalled(args[0])
+    var t = found ?? install(resolve(args[0]), false)
+    var cmd = args[1]
+    var exe = cmd
+    if (contains(TOOLS, cmd)) {
+        exe = t.dir + "/bin/" + cmd
+    }
+    var code = Process.run("env", ["BURN_TOOLCHAIN=" + t.name, "PATH=" + t.dir + "/bin:" + env("PATH"), exe] + slice(args, 2))
+    exit(code)
+}
+
+priv fun cmdLink(args: [string]) {
+    var p = positional(args, [])
+    if (len(p) != 2) {
+        die("usage: burnup link <name> <dir>", "the directory needs bin/burn, like the output of scripts/package.sh")
+    }
+    var dir = absPath(p[1])
+    if (!Files.isFile(dir + "/bin/burn")) {
+        die("${dir} has no bin/burn", "build one with `sh scripts/package.sh --prefix <dir>` in a Burn checkout")
+    }
+    var target = toolchainDir(p[0])
+    if (Files.isDir(target) || Files.isFile(target)) {
+        die("there is already a version called ${p[0]}", "remove it first with `burnup uninstall ${p[0]}`")
+    }
+    Files.makeDir(toolchainsDir())
+    if (Process.run("ln", ["-s", dir, target]) != 0) {
+        die("cannot link ${dir}", "")
+    }
+    var version = trim(Process.output(dir + "/bin/burn", ["version"]).out)
+    writeKeys(dir + "/burnup.toml", {"name": p[0], "ref": dir, "rev": "", "source": "link", "version": replace(version, "Burn ", "")})
+    step("Linked", "${p[0]} to ${dir}")
+}
+
+priv fun cmdSetup(args: [string]) {
+    Files.makeDir(binDir())
+    Files.makeDir(toolchainsDir())
+    var marker = burnHome() + "/.burnup"
+    if (!Files.isFile(marker)) {
+        writeFile(marker, "")
+    }
+    var wanted = option(args, "--toolchain")
+    var list = installed()
+    var t: Toolchain? = null
+    if (wanted != "") {
+        t = findInstalled(wanted) ?? install(resolve(wanted), false)
+    } else if (defaultName() != "" && findInstalled(defaultName()) != null) {
+        t = findInstalled(defaultName())
+    } else if (len(list) > 0) {
+        t = list[0]
+    } else {
+        t = install(resolve("latest"), false)
+    }
+    setDefault(t!!.name)
+    writeShims()
+    for (old in ["share/burn/tools", "share/burn/examples", "share/burn/install.sh"]) {
+        Files.remove(burnHome() + "/" + old)
+    }
+    if (!contains(args, "--no-ash")) {
+        installAsh(t!!)
+    }
+    var changed: [string] = []
+    if (!contains(args, "--no-modify-path")) {
+        changed = modifyPath()
+    } else {
+        writeEnv()
+    }
+    print("")
+    print(green("Burn ${t!!.version} is installed") + " as the default version (${t!!.name}).")
+    print("")
+    print("  burn, burni, burnc, burnfmt, burn-lsp, bvm   the Burn tools, from the active version")
+    if (Files.isFile(binDir() + "/ash")) {
+        print("  ash                                          the package manager")
+    }
+    print("  burnup                                       install and switch versions: burnup help")
+    print("")
+    if (len(changed) > 0) {
+        print("Added ${binDir()} to PATH in " + join(changed, ", ") + ".")
+        print("Restart your shell or run:  . \"" + burnHome() + "/env\"")
+    } else if (!onPath()) {
+        print("Add ${binDir()} to your PATH, for example:  . \"" + burnHome() + "/env\"")
+    }
+}
+
+priv fun cmdSelf(args: [string]) {
+    var what = ""
+    if (len(args) > 0) {
+        what = args[0]
+    }
+    if (what == "update") {
+        selfUpdate(activeToolchain(true))
+    } else if (what == "uninstall") {
+        var home = burnHome()
+        removePathLines()
+        if (Files.isFile(home + "/.burnup")) {
+            Files.remove(home)
+        } else {
+            for (tool in TOOLS) {
+                Files.remove(binDir() + "/" + tool)
+            }
+            for (x in ["bin/ash", "bin/burnup", "toolchains", "packages", "tools", "index", "index.fetched", "cache", "tmp", "env", "burnup.toml", "share/burn"]) {
+                Files.remove(home + "/" + x)
+            }
+        }
+        eprint(green("Burn has been uninstalled."))
+    } else {
+        die("usage: burnup self update | burnup self uninstall", "")
+    }
+}
+
+fun main() {
+    var argv = args()
+    if (len(argv) == 0) {
+        help()
+        return
+    }
+    var cmd = argv[0]
+    var rest = slice(argv, 1)
+    if (cmd == "proxy") {
+        if (len(rest) == 0) {
+            die("usage: burnup proxy <tool> [args...]", "")
+        }
+        proxy(rest[0], slice(rest, 1))
+    } else if (cmd == "-h" || cmd == "--help" || cmd == "help") {
+        help()
+    } else if (cmd == "-v" || cmd == "--version" || cmd == "version") {
+        print("burnup " + VERSION)
+    } else if (cmd == "install" || cmd == "add" || cmd == "i") {
+        cmdInstall(rest)
+    } else if (cmd == "uninstall" || cmd == "remove" || cmd == "rm") {
+        var names = positional(rest, [])
+        if (len(names) == 0) {
+            die("which version should be removed?", "see the installed ones with `burnup list`")
+        }
+        for (n in names) {
+            uninstall(n)
+        }
+    } else if (cmd == "default" || cmd == "use") {
+        cmdDefault(rest)
+    } else if (cmd == "list" || cmd == "ls") {
+        cmdList(rest)
+    } else if (cmd == "update" || cmd == "up") {
+        cmdUpdate(rest)
+    } else if (cmd == "pin") {
+        cmdPin(rest)
+    } else if (cmd == "show" || cmd == "current") {
+        cmdShow()
+    } else if (cmd == "which") {
+        cmdWhich(rest)
+    } else if (cmd == "run") {
+        cmdRun(rest)
+    } else if (cmd == "link") {
+        cmdLink(rest)
+    } else if (cmd == "ash") {
+        installAsh(activeToolchain(true))
+    } else if (cmd == "setup") {
+        cmdSetup(rest)
+    } else if (cmd == "self") {
+        cmdSelf(rest)
+    } else if (cmd == "uninstall-all") {
+        cmdSelf(["uninstall"])
+    } else {
+        die("`${cmd}` is not a burnup command", "see `burnup help`")
+    }
+}
