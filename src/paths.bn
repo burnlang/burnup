@@ -1,0 +1,111 @@
+import "fs"
+import "process"
+
+pub fun parentDir(path: string): string {
+    var p = path
+    while (len(p) > 1 && endsWith(p, "/")) {
+        p = substring(p, 0, len(p) - 1)
+    }
+    var parts = split(p, "/")
+    if (len(parts) <= 1) {
+        return "."
+    }
+    var up = join(slice(parts, 0, len(parts) - 1), "/")
+    if (up == "") {
+        return "/"
+    }
+    return up
+}
+
+pub fun absPath(path: string): string {
+    if (startsWith(path, "/")) {
+        return path
+    }
+    return Process.cwd() + "/" + path
+}
+
+pub fun burnHome(): string {
+    var h = env("BURN_HOME")
+    if (h != "") {
+        return absPath(h)
+    }
+    return env("HOME") + "/.burn"
+}
+
+pub fun binDir(): string {
+    return burnHome() + "/bin"
+}
+
+pub fun toolchainsDir(): string {
+    return burnHome() + "/toolchains"
+}
+
+pub fun shellQuote(text: string): string {
+    return "'" + replace(text, "'", "'\\''") + "'"
+}
+
+pub fun readKeys(path: string): {string: string} {
+    var out: {string: string} = {}
+    if (!Files.isFile(path)) {
+        return out
+    }
+    var section = ""
+    for (raw in split(readFile(path), "\n")) {
+        var line = trim(raw)
+        if (startsWith(line, "[")) {
+            section = trim(replace(replace(line, "[", ""), "]", ""))
+            continue
+        }
+        var eq = indexOf(line, "=")
+        if (eq <= 0 || startsWith(line, "#")) {
+            continue
+        }
+        var key = trim(substring(line, 0, eq))
+        var value = trim(substring(line, eq + 1))
+        var hash = indexOf(value, " #")
+        if (hash >= 0 && !startsWith(value, "\"")) {
+            value = trim(substring(value, 0, hash))
+        }
+        if (startsWith(value, "\"")) {
+            var rest = substring(value, 1)
+            var end = indexOf(rest, "\"")
+            if (end >= 0) {
+                value = substring(rest, 0, end)
+            }
+        }
+        if (section != "") {
+            key = section + "." + key
+        }
+        out[key] = value
+    }
+    return out
+}
+
+pub fun writeKeys(path: string, values: {string: string}) {
+    var names = keys(values)
+    sort(names)
+    var text = ""
+    for (k in names) {
+        text = text + k + " = \"" + replace(values[k]!!, "\"", "") + "\"\n"
+    }
+    Files.makeDir(parentDir(path))
+    if (!writeFile(path, text)) {
+        eprint("error: cannot write " + path)
+        exit(1)
+    }
+}
+
+pub fun findUp(start: string, names: [string]): string {
+    var dir = absPath(start)
+    while (true) {
+        for (n in names) {
+            if (Files.isFile(dir + "/" + n)) {
+                return dir + "/" + n
+            }
+        }
+        if (dir == "/" || dir == "." || dir == "") {
+            return ""
+        }
+        dir = parentDir(dir)
+    }
+}

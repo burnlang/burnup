@@ -6,28 +6,52 @@ on:
   pull_request:
 
 jobs:
-  install:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Build Burn
+        run: |
+          git clone --depth 1 https://github.com/burnlang/burn "$RUNNER_TEMP/burn"
+          cargo build --release --manifest-path "$RUNNER_TEMP/burn/Cargo.toml"
+          mkdir -p "$RUNNER_TEMP/tools"
+          for tool in burn burni burnc; do ln -sf "$RUNNER_TEMP/burn/target/release/burn" "$RUNNER_TEMP/tools/$tool"; done
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
       - name: Lint
+        run: shellcheck install.sh tests/e2e.sh
+      - run: burn fmt --check src/*.bn tests/*.bn
+      - run: burn check
+      - run: burn run tests/main.bn
+      - run: burn build
+      - name: End-to-end tests
+        run: BURNUP_BIN="$PWD/build/burnup" sh tests/e2e.sh
+      - name: End-to-end tests on the interpreter
+        run: sh tests/e2e.sh
+
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install from source with install.sh
+        env:
+          BURNUP_REPO: ${{ github.workspace }}
+          BURNUP_REF: ${{ github.sha }}
+          BURN_HOME: ${{ runner.temp }}/burn-home
+        run: sh install.sh --from-source --no-modify-path
+      - name: Use it
+        env:
+          BURN_HOME: ${{ runner.temp }}/burn-home
         run: |
-          sh -n install.sh
-          shellcheck install.sh
-      - name: Install from source
-        run: sh install.sh --from-source --no-modify-path --prefix "$RUNNER_TEMP/burn"
-      - name: Use the toolchain
-        run: |
-          export PATH="$RUNNER_TEMP/burn/bin:$PATH" BURN_HOME="$RUNNER_TEMP/burn"
+          export PATH="$BURN_HOME/bin:$PATH"
           burnup show
+          burnup list
+          burn version
           cd "$RUNNER_TEMP"
           ash init github.com/ci/hello
           cd hello
           ash build
           ./build/hello
-          ash install
-      - name: Uninstall
-        run: |
-          "$RUNNER_TEMP/burn/bin/burnup" uninstall --prefix "$RUNNER_TEMP/burn"
-          test ! -e "$RUNNER_TEMP/burn"
+          burnup self uninstall
+          test ! -e "$BURN_HOME"

@@ -1,0 +1,27 @@
+import "github.com/burnlang/burnup/src/paths"
+import "github.com/burnlang/burnup/src/semver"
+import "github.com/burnlang/burnup/src/toolchain"
+import "process"
+import "fs"
+
+var dir = trim(Process.output("mktemp", ["-d"]).out)
+writeFile(dir + "/burn.toml", "[package]\nname = \"github.com/a/b\" # the name\nburn = \"26.1\"\n\n[scripts]\ndev = \"x = y\"\n")
+var keys = readKeys(dir + "/burn.toml")
+assert(keys["package.name"] == "github.com/a/b")
+assert(keys["package.burn"] == "26.1")
+assert(keys["scripts.dev"] == "x = y")
+assert(pinnedIn(dir)?.spec == "26.1")
+writeKeys(dir + "/meta.toml", {"b": "2", "a": "1"})
+assert(readFile(dir + "/meta.toml") == "a = \"1\"\nb = \"2\"\n")
+Files.remove(dir + "/burn.toml")
+writeFile(dir + "/.burn-version", "master\n")
+assert(pinnedIn(dir)?.spec == "master")
+assert(parentDir("/a/b/c") == "/a/b")
+assert(isLatest("") && isLatest("stable") && !isLatest("master"))
+assert(versionMatches("26.1", parseVersion("v26.1.3")))
+assert(!versionMatches("1.0", parseVersion("v1.1.0")))
+assert(versionMatches("26.1", parseVersion("v26.1.0-experimental-1")))
+assert(versionMatches("^1.0", parseVersion("v1.4.0")))
+assert(!versionMatches("master", parseVersion("v1.0.0")))
+Files.remove(dir)
+print("burnup unit tests passed")
