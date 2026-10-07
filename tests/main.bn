@@ -3,6 +3,7 @@ import "github.com/burnlang/burnup/src/semver"
 import "github.com/burnlang/burnup/src/toolchain"
 import "process"
 import "fs"
+import "std/testing"
 
 var dir = trim(Process.output("mktemp", ["-d"]).out)
 writeFile(dir + "/burn.toml", "[package]\nname = \"github.com/a/b\" # the name\nburn = \"26.1\"\n\n[scripts]\ndev = \"x = y\"\n")

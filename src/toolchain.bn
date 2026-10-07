@@ -3,6 +3,9 @@ import "process"
 import "paths.bn"
 import "semver.bn"
 import "ui.bn"
+import "std/strings"
+import "std/math"
+import "std/time"
 
 pub def type Toolchain {
     string name
