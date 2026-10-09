@@ -20,17 +20,11 @@ expect() {
 
 burn_exe="$(command -v burn)"
 burni_exe="$(command -v burni)"
-burn_root="$(cd "$(dirname "$(readlink -f "$burn_exe")")" && pwd)"
+burn_root="$(cd "$(dirname "$burn_exe")/.." && pwd)"
 dist="$work/dist/burn"
-mkdir -p "$dist/bin"
-cp "$burn_root/burn" "$dist/bin/burn"
-for tool in burni burnc burn-lsp; do ln -s burn "$dist/bin/$tool"; done
-cat >"$dist/bin/burnfmt" <<'SH'
-#!/bin/sh
-exec "$(dirname "$0")/burn" fmt "$@"
-SH
-chmod +x "$dist/bin/burnfmt"
-if [ -x "$burn_root/bvm" ]; then cp "$burn_root/bvm" "$dist/bin/bvm"; fi
+mkdir -p "$work/dist"
+cp -R "$burn_root" "$dist"
+rm -f "$dist/burnup.toml"
 
 platform="$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/macos/')-$(uname -m | sed 's/amd64/x86_64/; s/arm64/aarch64/')"
 repo="$work/burn-repo"

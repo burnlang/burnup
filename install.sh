@@ -3,6 +3,7 @@ set -eu
 
 BURN_REPO="${BURN_REPO:-https://github.com/burnlang/burn}"
 BURN_REF="${BURN_REF:-master}"
+BURN_RELEASES="${BURN_RELEASES:-$BURN_REPO/releases/download}"
 BURNUP_REPO="${BURNUP_REPO:-https://github.com/burnlang/burnup}"
 BURNUP_REF="${BURNUP_REF:-master}"
 BURNUP_RELEASES="${BURNUP_RELEASES:-https://github.com/burnlang/burnup/releases/latest/download}"
@@ -169,9 +170,18 @@ from_source() {
         step "Downloading Burn ($BURN_REF)"
         clone "$BURN_REPO" "$BURN_REF" "$WORK/burn" || die "could not get $BURN_REF from $BURN_REPO"
         [ -f "$WORK/burn/scripts/package.sh" ] || die "Burn $BURN_REF is too old for burnup"
+        set --
+        if [ -f "$WORK/burn/compiler/STAGE0" ]; then
+            stage0="$(tr -d ' \n' <"$WORK/burn/compiler/STAGE0")"
+            step "Downloading Burn $stage0, which builds Burn for the first time"
+            download "$BURN_RELEASES/$stage0/burn-$OS-$ARCH.tar.gz" "$WORK/stage0.tar.gz" || die "could not download Burn $stage0 for $OS-$ARCH"
+            mkdir -p "$WORK/stage0"
+            tar -xzf "$WORK/stage0.tar.gz" -C "$WORK/stage0" || die "could not unpack Burn $stage0"
+            set -- --stage0 "$WORK/stage0/burn/bin/burn"
+        fi
         step "Building Burn (this takes a minute)"
         rm -rf "$toolchain.partial"
-        sh "$WORK/burn/scripts/package.sh" --prefix "$toolchain.partial" -q || die "the Burn build failed"
+        sh "$WORK/burn/scripts/package.sh" --prefix "$toolchain.partial" -q "$@" || die "the Burn build failed"
         rm -rf "$toolchain"
         mv "$toolchain.partial" "$toolchain"
         version="$("$toolchain/bin/burn" version | sed 's/^Burn //')"

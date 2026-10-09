@@ -7,6 +7,9 @@ on:
 permissions:
   contents: write
 
+env:
+  BURN_VERSION: v26.1.0-experimental-4
+
 jobs:
   build:
     strategy:
@@ -14,19 +17,18 @@ jobs:
         include:
           - os: ubuntu-latest
             asset: burnup-linux-x86_64
+            burn: burn-linux-x86_64.tar.gz
           - os: macos-15-intel
             asset: burnup-macos-x86_64
+            burn: burn-macos-x86_64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build Burn
-        run: |
-          git clone --depth 1 https://github.com/burnlang/burn "$RUNNER_TEMP/burn"
-          cargo build --release --manifest-path "$RUNNER_TEMP/burn/Cargo.toml"
+      - name: Install Burn
+        run: curl -fsSL "https://github.com/burnlang/burn/releases/download/$BURN_VERSION/${{ matrix.burn }}" | tar -xz -C "$RUNNER_TEMP"
       - name: Build burnup
         run: |
-          "$RUNNER_TEMP/burn/target/release/burn" build --target native -o "${{ matrix.asset }}"
+          "$RUNNER_TEMP/burn/bin/burn" build --target native -o "${{ matrix.asset }}"
           "./${{ matrix.asset }}" version
       - uses: softprops/action-gh-release@v2
         with:

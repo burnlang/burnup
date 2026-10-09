@@ -342,12 +342,38 @@ priv fun fromSource(t: Target, partial: string) {
         releaseLock(t.name)
         die("Burn ${t.name} is too old for burnup (it has no scripts/package.sh)", "install a newer version")
     }
+    var args = [src + "/scripts/package.sh", "--prefix", partial, "-q"]
+    var stage0 = stageZero(src, t)
+    if (stage0 != "") {
+        args.push("--stage0")
+        args.push(stage0)
+    }
     step("Building", "Burn ${t.name} from source (the first build takes a minute)")
-    if (run("sh", [src + "/scripts/package.sh", "--prefix", partial, "-q"]) != 0) {
+    if (run("sh", args) != 0) {
         Files.remove(partial)
         releaseLock(t.name)
         die("building Burn ${t.name} failed", "")
     }
+}
+
+/**
+ * The `burn` that compiles the compiler written in Burn for the first time, from the release named in the
+ * checkout's `compiler/STAGE0`, installed first when it is missing; `""` for versions that need none.
+ */
+priv fun stageZero(src: string, t: Target): string {
+    var file = src + "/compiler/STAGE0"
+    if (!Files.isFile(file)) {
+        return ""
+    }
+    var tag = trim(readFile(file))
+    if (tag == "" || tag == t.name) {
+        return ""
+    }
+    if (readToolchain(tag) == null) {
+        step("Installing", "Burn ${tag}, which builds Burn ${t.name} for the first time")
+        install(Target { name: tag, kind: "tag", ref: tag, rev: remote().tags[tag] ?? "" }, false)
+    }
+    return toolchainDir(tag) + "/bin/burn"
 }
 
 priv fun lockPath(name: string): string {
