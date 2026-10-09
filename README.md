@@ -27,7 +27,9 @@ burnup uninstall master
 ```
 
 A version is a release (`26.1`, `v26.1.0`, `^26.1`), `latest`, a branch such as `master`, or a commit. Releases
-are downloaded prebuilt; branches and commits are built from source, which needs Rust.
+are downloaded prebuilt; branches and commits are built from source, which needs Rust for bvm. Burn is written in
+Burn, so a source build first installs the release named in the checkout's `compiler/STAGE0` and lets it compile
+the compiler once.
 
 ## Projects
 
@@ -91,7 +93,7 @@ Installer options, passed with `sh -s --`:
 | `--no-modify-path` | do not touch your shell profile |
 
 The installer downloads a prebuilt burnup when there is one for your platform. Otherwise it builds Burn once from
-source and compiles burnup with it.
+source, starting from the release named in `compiler/STAGE0`, and compiles burnup with it.
 
 ## Development
 

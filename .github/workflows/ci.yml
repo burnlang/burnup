@@ -5,19 +5,18 @@ on:
     branches: [master]
   pull_request:
 
+env:
+  BURN_VERSION: v26.1.0-experimental-4
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build Burn
+      - name: Install Burn
         run: |
-          git clone --depth 1 https://github.com/burnlang/burn "$RUNNER_TEMP/burn"
-          cargo build --release --manifest-path "$RUNNER_TEMP/burn/Cargo.toml"
-          mkdir -p "$RUNNER_TEMP/tools"
-          for tool in burn burni burnc; do ln -sf "$RUNNER_TEMP/burn/target/release/burn" "$RUNNER_TEMP/tools/$tool"; done
-          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+          curl -fsSL "https://github.com/burnlang/burn/releases/download/$BURN_VERSION/burn-linux-x86_64.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/burn/bin" >> "$GITHUB_PATH"
       - name: Lint
         run: shellcheck install.sh tests/e2e.sh
       - run: burn fmt --check src/*.bn tests/*.bn
